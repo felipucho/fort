@@ -57,6 +57,7 @@ echo.
 echo   [1] Aplicar Seguro     - cambios reversibles, riesgo bajo
 echo   [2] Avanzado           - confirma S/N por cada tweak
 echo   [D] Diagnostico        - detecta hardware, no cambia nada
+echo   [V] Verificar          - revisa que quedo aplicado
 echo   [R] Revertir           - abre Revertir-InputTweaks.bat
 echo   [S] Salir
 echo.
@@ -65,6 +66,7 @@ set /p "OPCION=Elegi una opcion: "
 if /i "!OPCION!"=="1" goto APPLY_SAFE
 if /i "!OPCION!"=="2" goto APPLY_ADV
 if /i "!OPCION!"=="D" goto DIAG
+if /i "!OPCION!"=="V" goto VERIFY
 if /i "!OPCION!"=="R" goto GO_REVERT
 if /i "!OPCION!"=="S" exit /b 0
 goto MENU
@@ -81,6 +83,25 @@ echo --- GPU activas y modo de video actual ---
 echo.
 echo --- Aviso de refresco ---
 %PS% "$b=$false; Get-CimInstance Win32_VideoController | Where-Object { $_.CurrentRefreshRate -gt 0 } | ForEach-Object { if ($_.CurrentRefreshRate -lt 75) { $b=$true; Write-Host ('  ATENCION: ' + $_.Name + ' esta a ' + $_.CurrentRefreshRate + ' Hz') -ForegroundColor Yellow } }; if (-not $b) { Write-Host '  OK: ningun adaptador por debajo de 75 Hz' -ForegroundColor Green }"
+echo.
+echo --- Monitores conectados - nombre real desde EDID ---
+%PS% "Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object { $n=-join($_.UserFriendlyName | Where-Object { $_ -gt 0 } | ForEach-Object { [char]$_ }); Write-Host ('  Monitor: ' + $n) }"
+echo   NOTA: el Hz maximo lo fija el EDID. Para pasarlo hace falta CRU
+echo   y despues verificar frame skipping en testufo.com/frameskipping
+echo.
+echo --- Preferencia de GPU para Fortnite ---
+call :FIND_FN_EXE
+if not defined FNEXE (
+    echo   No se encontro el binario, no se puede consultar.
+) else (
+    reg query "%K_GPUPREF%" /v "!FNEXE!" >nul 2>&1
+    if errorlevel 1 (
+        echo   SIN preferencia fijada - Windows elige y puede caer en la iGPU.
+        echo   Usa la opcion 2, tweak A2, para forzar la RX 6800 XT.
+    ) else (
+        echo   Preferencia fijada. GpuPreference=2 es alto rendimiento.
+    )
+)
 echo.
 echo --- Mouse y cadena de dispositivos hasta el controlador PCI ---
 %PS% "foreach($d in Get-CimInstance Win32_PointingDevice){ $id=$d.PNPDeviceID; if(-not $id){continue}; Write-Host ('  Mouse: ' + $d.Name); Write-Host ('    InstanceId: ' + $id); $p=$id; for($i=0;$i -lt 8;$i++){ try{ $par=(Get-PnpDeviceProperty -InstanceId $p -KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data }catch{ break }; if(-not $par){ break }; Write-Host ('    padre: ' + $par); if($par -like 'PCI*'){ try{ $n=(Get-PnpDevice -InstanceId $par -ErrorAction Stop).FriendlyName; Write-Host ('    CONTROLADOR USB: ' + $n) -ForegroundColor Cyan }catch{}; break }; $p=$par } }"
@@ -116,6 +137,42 @@ echo   Medilo con MouseTester - ver protocolo de medicion.
 echo.
 pause
 goto MENU
+
+:VERIFY
+cls
+echo ================= VERIFICACION =================
+echo Solo lee el registro. No cambia nada.
+echo.
+call :CHK "%K_MOUSE%" "MouseSpeed" "0"
+call :CHK "%K_MOUSE%" "MouseThreshold1" "0"
+call :CHK "%K_MOUSE%" "MouseThreshold2" "0"
+call :CHK "%K_KBD%" "KeyboardDelay" "0"
+call :CHK "%K_KBD%" "KeyboardSpeed" "31"
+call :CHK "%K_DVR1%" "AppCaptureEnabled" "0x0"
+call :CHK "%K_DVR2%" "GameDVR_Enabled" "0x0"
+call :CHK "%K_DVR3%" "AllowGameDVR" "0x0"
+call :CHK "%K_GBAR%" "AutoGameModeEnabled" "0x1"
+echo.
+echo --- Solo del perfil Avanzado, opcionales ---
+call :CHK "%K_HAGS%" "HwSchMode" "0x2"
+echo.
+pause
+goto MENU
+
+:CHK
+REM %1=clave %2=valor %3=dato esperado tal cual lo muestra reg query
+set "CH_CUR="
+for /f "tokens=2,*" %%a in ('reg query "%~1" /v "%~2" 2^>nul ^| findstr /i /c:"%~2"') do set "CH_CUR=%%b"
+if not defined CH_CUR (
+    echo   %~2 = sin valor  -^> PENDIENTE
+    goto :eof
+)
+if /i "!CH_CUR!"=="%~3" (
+    echo   %~2 = !CH_CUR!  -^> OK
+) else (
+    echo   %~2 = !CH_CUR!  -^> DISTINTO, esperado %~3
+)
+goto :eof
 
 REM ===================================================================
 REM  APLICAR - PERFIL SEGURO
@@ -439,10 +496,14 @@ REM  UTILIDADES
 REM ===================================================================
 
 :FIND_FN_EXE
+REM Detecta el binario. Primero la ruta por defecto y, si no esta ahi,
+REM lee los manifests del Epic Games Launcher para encontrar la
+REM instalacion real en cualquier disco.
 set "FNEXE="
-for %%P in (
- "C:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe"
-) do if exist "%%~P" set "FNEXE=%%~P"
+set "FNDEF=C:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe"
+if exist "%FNDEF%" set "FNEXE=%FNDEF%"
+if defined FNEXE goto :eof
+for /f "delims=" %%e in ('%PS% "$d=Join-Path $env:ProgramData 'Epic\EpicGamesLauncher\Data\Manifests'; if(Test-Path -LiteralPath $d){ foreach($f in Get-ChildItem -LiteralPath $d -Filter *.item -ErrorAction SilentlyContinue){ try{ $j=Get-Content -LiteralPath $f.FullName -Raw ^| ConvertFrom-Json; if($j.InstallLocation -and ($j.DisplayName -like '*Fortnite*' -or $j.MandatoryAppFolderName -like '*Fortnite*')){ $q=Join-Path $j.InstallLocation 'FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe'; if(Test-Path -LiteralPath $q){ $q; exit } } }catch{} } }"') do set "FNEXE=%%e"
 goto :eof
 
 :PREP_BACKUP
@@ -494,17 +555,28 @@ goto :eof
 
 :SETREG
 REM %1=clave %2=valor %3=tipo %4=dato
+REM Idempotente: solo escribe si el dato actual difiere del deseado.
+REM Para REG_DWORD convierte el 0x... de reg query a decimal con
+REM set /a, asi la comparacion funciona con cualquier ancho de valor.
 set "SR_K=%~1"
 set "SR_V=%~2"
 set "SR_T=%~3"
 set "SR_D=%~4"
-if /i "%SR_T%"=="REG_DWORD" (set "SR_EXP=0x%SR_D%") else (set "SR_EXP=%SR_D%")
 set "SR_CUR="
 for /f "tokens=2,*" %%a in ('reg query "%SR_K%" /v "%SR_V%" 2^>nul ^| findstr /i /c:"%SR_V%"') do set "SR_CUR=%%b"
-if /i "!SR_CUR!"=="%SR_EXP%" (
-    call :LOG OK "Ya aplicado - %SR_V%"
-    goto :eof
-)
+if not defined SR_CUR goto SR_WRITE
+if /i not "%SR_T%"=="REG_DWORD" goto SR_CMPSTR
+set "SR_CURN="
+set /a SR_CURN=!SR_CUR! 2>nul
+if "!SR_CURN!"=="%SR_D%" goto SR_SAME
+goto SR_WRITE
+:SR_CMPSTR
+if /i "!SR_CUR!"=="%SR_D%" goto SR_SAME
+goto SR_WRITE
+:SR_SAME
+call :LOG OK "Ya aplicado - %SR_V%"
+goto :eof
+:SR_WRITE
 call :BK_VALUE "%SR_K%" "%SR_V%"
 reg add "%SR_K%" /v "%SR_V%" /t %SR_T% /d "%SR_D%" /f >nul 2>&1
 if errorlevel 1 (
